@@ -1,4 +1,5 @@
-from googletrans import Translator
+from deep_translator import GoogleTranslator
+
 import gradio as gr
 import librosa
 import numpy as np
@@ -16,12 +17,12 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration
 
 SAMPLING_RATE = 16000
 general_model_name = 'large-v2'
-hebrew_model_name = 'ivrit-ai/whisper-v2-d3-e3'
+hebrew_model_name = 'openai/whisper-large-v2'
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 general_model = whisper.load_model(general_model_name, device=device)
-hebrew_processor = WhisperProcessor.from_pretrained(hebrew_model_name)
-hebrew_model = WhisperForConditionalGeneration.from_pretrained(hebrew_model_name).to(device)
-translator = Translator()
+hebrew_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v2")
+hebrew_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v2").to(device)
+translator = GoogleTranslator(source='auto', target='iw')
 
 def is_hebrew(text):
     return bool(re.search(r'[\u0590-\u05FF]', text))
@@ -109,9 +110,19 @@ def transcribe_with_hebrew_model(audio_file_path):
     return {"segments": transcribed_segments}
 
 def translate_text(text, target_lang):
-    translations = {'Hebrew': 'he', 'English': 'en', 'Spanish': 'es', 'French': 'fr', 'German': 'de', 'Portuguese': 'pt', 'Arabic': 'ar'}
-    translated_text = translator.translate(text, dest=translations[target_lang]).text
-    return translated_text
+    translations = {
+        'Hebrew': 'iw',  # <== use 'iw' not 'he'
+        'English': 'en',
+        'Spanish': 'es',
+        'French': 'fr',
+        'German': 'de',
+        'Portuguese': 'pt',
+        'Arabic': 'ar'
+    }
+    code = translations.get(target_lang)
+    if not code:
+        return f"Unsupported language: {target_lang}"
+    return GoogleTranslator(source='auto', target=code).translate(text)
 
 def transcribe(audio_numpy, sampling_rate=16000):
     if audio_numpy.ndim > 1:
@@ -133,36 +144,54 @@ def transcribe(audio_numpy, sampling_rate=16000):
     return transcribed_text
 
 def transcribe_and_translate(audio_file, target_language, model_choice, generate_srt_checkbox):
-    if not target_language:
-        return format_text("Please choose a Target Language")
+    try:
+        if not audio_file:
+            return format_text("No audio file was uploaded.")
 
-    audio_length = get_audio_length(audio_file)
+        # Fix for tuple input from gradio, which sometimes gives (path, sample_rate)
+        if isinstance(audio_file, tuple):
+            audio_file = audio_file[0]
 
-    if torch.cuda.is_available():
-        print("GPU is available")
-        gpu_info = torch.cuda.get_device_properties(0)
-        print(f"GPU name: {gpu_info.name}")
-        print(f"GPU memory usage before transcription:")
-        print(torch.cuda.memory_summary(device=None, abbreviated=False))
+        # Check if path exists
+        if not os.path.exists(audio_file):
+            return format_text(f"Uploaded file not found: {audio_file}")
 
-    # Always transcribe with the general model to get accurate timestamps
-    general_transcription_result = transcribe_with_general_model(audio_file)
-    general_segments = general_transcription_result['segments']
-    total_general_duration = sum([segment['end'] - segment['start'] for segment in general_segments])
+        if not target_language:
+            return format_text("Please choose a Target Language")
 
-    # Accumulator for proportional timings
-    proportional_timings = []
-    cumulative_duration = 0.0
-    for general_segment in general_segments:
-        general_duration = general_segment['end'] - general_segment['start']
-        proportional_duration = (general_duration / total_general_duration) * audio_length
-        proportional_timings.append((cumulative_duration, cumulative_duration + proportional_duration))
-        cumulative_duration += proportional_duration
+        audio_length = get_audio_length(audio_file)
 
-    if model_choice == 'General Model':
-        return process_general_model(general_segments, target_language, generate_srt_checkbox, audio_length, proportional_timings)
-    else:
-        return process_hebrew_model(audio_file, target_language, generate_srt_checkbox, audio_length, proportional_timings)
+        if torch.cuda.is_available():
+            print("GPU is available")
+            gpu_info = torch.cuda.get_device_properties(0)
+            print(f"GPU name: {gpu_info.name}")
+            print(f"GPU memory usage before transcription:")
+            print(torch.cuda.memory_summary(device=None, abbreviated=False))
+
+        # Always transcribe with the general model to get accurate timestamps
+        general_transcription_result = transcribe_with_general_model(audio_file)
+        general_segments = general_transcription_result['segments']
+        total_general_duration = sum([segment['end'] - segment['start'] for segment in general_segments])
+
+        # Accumulator for proportional timings
+        proportional_timings = []
+        cumulative_duration = 0.0
+        for general_segment in general_segments:
+            general_duration = general_segment['end'] - general_segment['start']
+            proportional_duration = (general_duration / total_general_duration) * audio_length
+            proportional_timings.append((cumulative_duration, cumulative_duration + proportional_duration))
+            cumulative_duration += proportional_duration
+
+        if model_choice == 'General Model':
+            return process_general_model(general_segments, target_language, generate_srt_checkbox, audio_length, proportional_timings)
+        else:
+            return process_hebrew_model(audio_file, target_language, generate_srt_checkbox, audio_length, proportional_timings)
+
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print("=== ERROR ===\n", error_trace)
+        return format_text(f"<b style='color:red;'>Error:</b> {str(e)}<br><pre>{error_trace}</pre>")
 
 
 def process_general_model(general_segments, target_language, generate_srt_checkbox, audio_length, proportional_timings):
